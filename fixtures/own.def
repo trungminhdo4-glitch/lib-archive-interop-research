@@ -1,0 +1,4 @@
+LIBRARY own
+EXPORTS
+    add
+    mul

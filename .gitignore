@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+# local probe/sandbox outputs (never commit; vendor binary lives outside)
+probes*.json
+sweep.json
+*.log
+*.res
+sandbox/
