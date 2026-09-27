@@ -13,6 +13,7 @@ Exit: 0 = members agree, 1 = disagreement, 3 = malformed archive.
 import json
 import struct
 import sys
+from collections import Counter
 from pathlib import Path
 
 ARCH_MAGIC = b"!<arch>\n"
@@ -68,7 +69,11 @@ def decode_first_member(body):
         parts.pop()
     if len(parts) != count:
         raise LibError("m1 name count %d != %d" % (len(parts), count))
-    return dict(zip((p.decode("ascii", "replace") for p in parts), offs))
+    # Preserve every encoded occurrence: m1 is member-ordered while m2 is
+    # lexical, so cross-member comparison must be order-insensitive but
+    # multiplicity-sensitive. A dict would silently collapse duplicates.
+    entries = [(p.decode("ascii", "replace"), o) for p, o in zip(parts, offs)]
+    return {"count": count, "entries": entries}
 
 
 def decode_second_member(body):
@@ -93,7 +98,16 @@ def decode_second_member(body):
         parts.pop()
     if len(parts) != nsyms:
         raise LibError("m2 name count %d != %d" % (len(parts), nsyms))
-    return {p.decode("ascii", "replace"): offs[i - 1] for p, i in zip(parts, idx)}
+    # Preserve the raw offset table (unreferenced slots must still land on
+    # headers per RQ2) plus every symbol occurrence for multiset agreement.
+    entries = [(p.decode("ascii", "replace"), offs[i - 1]) for p, i in zip(parts, idx)]
+    return {
+        "nmembers": nmembers,
+        "offs": offs,
+        "nsyms": nsyms,
+        "indices": idx,
+        "entries": entries,
+    }
 
 
 def resolve_name(raw, longnames):
@@ -143,14 +157,18 @@ def verify(path):
         data[members[1]["body_offset"] : members[1]["body_offset"] + members[1]["size"]]
     )
     headers = {m["header_offset"] for m in members}
-    report["n_symbols_m1"] = len(m1)
-    report["n_symbols_m2"] = len(m2)
-    report["symbols_equal"] = set(m1) == set(m2)
-    report["offsets_agree"] = report["symbols_equal"] and all(
-        m1[k] == m2[k] for k in m1
-    )
-    report["offsets_on_headers_m1"] = all(o in headers for o in m1.values())
-    report["offsets_on_headers_m2"] = all(o in headers for o in m2.values())
+    report["n_symbols_m1"] = m1["count"]
+    report["n_symbols_m2"] = m2["nsyms"]
+    report["symbols_equal"] = {n for n, _ in m1["entries"]} == {
+        n for n, _ in m2["entries"]
+    }
+    # Order-insensitive (m1 member-ordered, m2 lexical per spec) but
+    # multiplicity-sensitive: duplicate occurrences must match exactly.
+    report["offsets_agree"] = Counter(m1["entries"]) == Counter(m2["entries"])
+    report["offsets_on_headers_m1"] = all(o in headers for _, o in m1["entries"])
+    report["offsets_on_headers_m2"] = all(
+        o in headers for _, o in m2["entries"]
+    ) and all(o in headers for o in m2["offs"])
     resolved = []
     for m in members[first_regular:]:
         kind, name = resolve_name(m["name_raw"], longnames)
